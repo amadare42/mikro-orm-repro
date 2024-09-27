@@ -1,51 +1,81 @@
-import { Entity, MikroORM, PrimaryKey, Property } from '@mikro-orm/sqlite';
+import { Entity, ManyToOne, MikroORM, PrimaryKey, Property } from '@mikro-orm/sqlite';
+import { SoftDelete } from './softDelete';
 
 @Entity()
+@SoftDelete()
 class User {
+    @PrimaryKey()
+    id!: number;
 
-  @PrimaryKey()
-  id!: number;
+    @Property()
+    name!: string;
 
-  @Property()
-  name: string;
+    @Property({ unique: true })
+    email!: string;
 
-  @Property({ unique: true })
-  email: string;
+    @Property()
+    deletedAt: Date | null = null;
+}
 
-  constructor(name: string, email: string) {
-    this.name = name;
-    this.email = email;
-  }
+@Entity()
+class UserBlock {
+    @PrimaryKey()
+    id!: number;
 
+    @ManyToOne()
+    user!: User;
+
+    @ManyToOne()
+    target!: User;
 }
 
 let orm: MikroORM;
 
 beforeAll(async () => {
-  orm = await MikroORM.init({
-    dbName: ':memory:',
-    entities: [User],
-    debug: ['query', 'query-params'],
-    allowGlobalContext: true, // only for testing
-  });
-  await orm.schema.refreshDatabase();
+    orm = await MikroORM.init({
+        dbName: ':memory:',
+        entities: [User, UserBlock],
+        debug: ['query', 'query-params'],
+        allowGlobalContext: true, // only for testing
+    });
+    await orm.schema.refreshDatabase();
 });
+
+async function setupFixture() {
+    const deletedUser = orm.em.create(User, { name: 'Deleted User', email: 'deletedUser@example.com', deletedAt: new Date() });
+    const activeUser = orm.em.create(User, { name: 'Active User', email: 'activeUser@example.com' });
+    orm.em.create(UserBlock, { user: activeUser, target: deletedUser });
+    await orm.em.flush();
+    orm.em.clear();
+
+    return { activeUser, deletedUser };
+
+}
 
 afterAll(async () => {
-  await orm.close(true);
+    await orm.close(true);
 });
 
-test('basic CRUD example', async () => {
-  orm.em.create(User, { name: 'Foo', email: 'foo' });
-  await orm.em.flush();
-  orm.em.clear();
+test('fetching whole entity', async () => {
+    const { activeUser } = await setupFixture();
 
-  const user = await orm.em.findOneOrFail(User, { email: 'foo' });
-  expect(user.name).toBe('Foo');
-  user.name = 'Bar';
-  orm.em.remove(user);
-  await orm.em.flush();
+    const result = await orm.em.find(UserBlock, {
+        user: activeUser.id,
+    })
 
-  const count = await orm.em.count(User, { email: 'foo' });
-  expect(count).toBe(0);
+    // No entities returned here because inner join was used while soft-deleted user was filtered out
+    expect(result).toHaveLength(0);
 });
+
+test('fetching specific field', async () => {
+    const { activeUser } = await setupFixture();
+
+    const result = await orm.em.find(UserBlock, {
+        user: activeUser.id,
+    }, {
+        fields: ['target.id']
+    })
+
+    // Here entity is returned unexpectedly because left join was used so soft-deleted "target" is set to null
+    expect(result).toHaveLength(0);
+})
